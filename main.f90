@@ -28,6 +28,8 @@ real(8), parameter::heat_transfer_coefficient = 837d0 !熱伝達係数
 real(8), parameter::volume = dx*dy
 real(8), parameter::surface = dx
 
+real(8), parameter::Liquid_initial_temp = 0d0
+real(8), parameter::Prizm_initial_temp = 100d0
 
 real(8)::dt
 real(8)::visc,arufa,err_total
@@ -40,6 +42,8 @@ real(8),dimension(0:nxd+1,0:nyc+1)::u
 real(8),dimension(0:nxc+1,0:nyd+1)::v
 real(8),dimension(0:nxd+1,0:nyc+1)::u_aux
 real(8),dimension(0:nxc+1,0:nyd+1)::v_aux
+real(8),dimension(0:nxd+1,0:nyc+1)::flux_u
+real(8),dimension(0:nxc+1,0:nyd+1)::flux_v
 real(8),dimension(0:nxc+1,0:nyc+1)::p
 real(8),dimension(0:nxc+1,0:nyc+1)::phi
 real(8),dimension(0:nxc+1,0:nyc+1)::dp
@@ -47,8 +51,7 @@ real(8),dimension(nxc    ,nyc    )::theta
 
 real(8),dimension(0:nxc+1,0:nyc+1)::temp
 real(8),dimension(0:nxc+1,0:nyc+1)::temp_old
-real(8),dimension(0:nxc+1,0:nyc+1)::eneg
-real(8),dimension(0:nxc+1,0:nyc+1)::eneg_old
+real(8),dimension(0:nxc+1,0:nyc+1)::temp_conv
 
 integer,parameter::prizm_left   = 90
 integer,parameter::prizm_right  = 110
@@ -75,7 +78,9 @@ v_aux(:,:) = 0d0
 p(:,:) = 0d0
 phi(:,:) = 0d0
 theta(:,:) = 0d0
-temp(:,:) = 0d0
+temp(:,:) = Liquid_initial_temp
+flux_u(:,:) = 0d0
+flux_v(:,:) = 0d0
 
 u(0,:) = uin*2d0 - u(1,:)
 u(:,0) = uin*2d0 - u(:,1)
@@ -85,13 +90,15 @@ v(0,:) = 0d0
 v(:,0) = 0d0
 v(:,nyd) = 0d0    
 
-temp(prizm_left:prizm_right,prizm_bottom:prizm_top) = 100d0
+temp(prizm_left:prizm_right,prizm_bottom:prizm_top) = Prizm_initial_temp
+
+temp(10:20,10:20) = Prizm_initial_temp
 
 call setBoundary(u,v,uin,prizm_left,prizm_right,prizm_top,prizm_bottom)
 
 ! メインルーチン
 ! outputstep = 500
-outputstep = 100
+outputstep = 50
 
 call cpu_time(start_time)
 write(*,*) dt,nt
@@ -107,7 +114,7 @@ do time = 1,5000
     call computeVelocity(u,v,u_aux,v_aux,dt,dx,dy,dens,phi,uin, &
                         prizm_left,prizm_right,prizm_top,prizm_bottom)
 
-    call computeTemp(temp,temp_old,eneg,eneg_old)
+    call computeTemp(temp,temp_old,temp_conv,flux_u,flux_v,u,v)
 
     if(mod(time,outputstep)==0)then
         call output(u,v,p,phi,time,temp)
@@ -369,26 +376,40 @@ subroutine computeVelocity(u,v,u_aux,v_aux,dt,dx,dy,dens,phi,uin,prizm_left,priz
 
 end subroutine
 
-subroutine computeTemp(temp,temp_old,eneg,eneg_old)
+subroutine computeTemp(temp,temp_old,temp_conv,flux_u,flux_v,u,v)
     real(8),intent(inout)::temp(0:,0:)
     real(8),intent(inout)::temp_old(0:,0:)
-    real(8),intent(inout)::eneg(0:,0:)
-    real(8),intent(inout)::eneg_old(0:,0:)
+    real(8),intent(inout)::temp_conv(0:,0:)
+    real(8),intent(inout)::flux_u(0:,0:)
+    real(8),intent(inout)::flux_v(0:,0:)
+    real(8),intent(in   )::u(0:,0:)
+    real(8),intent(in   )::v(0:,0:)
 
     integer::i,j,id,jd
     real(8)::conv_u1,conv_u2,conv_v1,conv_v2
+    real(8)::temp_w
     real(8)::u_diff,v_diff
     real(8)::res_e,res_w,res_n,res_s
     real(8)::max_temp,min_temp
-    real(8)::test
+    real(8)::test1,test2
 
     real(8)::heat_conv
 
     temp_old(:,:) = temp(:,:)
+    temp_conv(:,:) = temp(:,:)
 
     !最大値と最小値の設定
-    max_temp = maxval(temp)
-    min_temp = minval(temp)
+    ! max_temp = maxval(temp)
+    ! min_temp = minval(temp)
+    max_temp = Liquid_initial_temp
+    min_temp = Prizm_initial_temp
+    do j=1,nyc
+    do i=1,nxc
+        if(prizm_left <= i .and. i<=prizm_right .and. prizm_bottom<=j .and. j<=prizm_top)cycle
+        if(temp(i,j) > max_temp) max_temp = temp(i,j)
+        if(temp(i,j) < min_temp) min_temp = temp(i,j)
+    enddo
+    enddo
 
     print *, max_temp,min_temp
 
@@ -404,9 +425,13 @@ subroutine computeTemp(temp,temp_old,eneg,eneg_old)
             temp(i  ,j) = temp(i  ,j) - heat_conv
             temp(i-1,j) = temp(i-1,j) + heat_conv            
         endif
-        if(i==111.and.j==39)then
-            print *, temp(i,j),heat_conv
-        endif
+        ! if(i==111.and.j==40)then
+        !     print *, temp(i,j),temp_old(i,j),heat_conv
+        ! endif
+
+        ! Flux 6.25式（数値流体解析の基礎）
+        flux_u(i,j) = u(i,j)*(temp(i,j)+temp(i-1,j))/2d0 &
+                    - (visc/dx + abs(u(i,j))/2d0)*(temp(i,j)-temp(i-1,j))
     enddo
     enddo
     do jd=1,nyd
@@ -420,9 +445,13 @@ subroutine computeTemp(temp,temp_old,eneg,eneg_old)
             temp(i,j  ) = temp(i  ,j  ) - heat_conv
             temp(i,j-1) = temp(i  ,j-1) + heat_conv            
         endif
-        if(i==111.and.j==39)then
-            print *, temp(i,j),heat_conv
-        endif
+        ! if(i==111.and.j==39)then
+        !     print *, temp(i,j),heat_conv
+        ! endif
+
+        ! Flux 6.25式（数値流体解析の基礎）
+        flux_v(i,j) = v(i,j)*(temp(i,j)+temp(i,j-1))/2d0 &
+                    - (visc/dy + abs(v(i,j))/2d0)*(temp(i,j)-temp(i,j-1))
     enddo
     enddo
     
@@ -430,15 +459,16 @@ subroutine computeTemp(temp,temp_old,eneg,eneg_old)
     do j=1,nyc
     do i=1,nxc
         if(prizm_left <= i .and. i<=prizm_right .and. prizm_bottom<=j .and. j<=prizm_top)cycle
-        if(i==prizm_right+1 .and. prizm_bottom<=j .and. j<=prizm_top)then !左側が角柱
+        if(i==prizm_left-1 .and. prizm_bottom<=j .and. j<=prizm_top)then !右側が角柱
+            ! eastが東、角柱があるのはeast
+            res_e = 1d0/heat_transfer_coefficient + dx/(2d0*ramda_cavity) + dx/(2d0*ramda_mold)
+            res_w = dx/ramda_cavity
+            res_n = dy/ramda_cavity
+            res_s = dy/ramda_cavity
+        elseif(i==prizm_right+1 .and. prizm_bottom<=j .and. j<=prizm_top)then !左側が角柱
             ! eastが東、角柱があるのはwest
             res_e = dx/ramda_cavity
             res_w = 1d0/heat_transfer_coefficient + dx/(2d0*ramda_cavity) + dx/(2d0*ramda_mold)
-            res_n = dy/ramda_cavity
-            res_s = dy/ramda_cavity
-        elseif(i==prizm_left-1 .and. prizm_bottom<=j .and. j<=prizm_top)then !右側が角柱
-            res_e = 1d0/heat_transfer_coefficient + dx/(2d0*ramda_cavity) + dx/(2d0*ramda_mold)
-            res_w = dx/ramda_cavity
             res_n = dy/ramda_cavity
             res_s = dy/ramda_cavity
         elseif(j==prizm_bottom-1 .and. prizm_left <= i .and. i<=prizm_right)then !角柱があるのは上側
@@ -459,17 +489,36 @@ subroutine computeTemp(temp,temp_old,eneg,eneg_old)
             res_s = dy/ramda_cavity
         endif
         ! TopCASTのソース(熱伝導計算)
+        ! temp w = temp(i,j) + temp_conv(i,j)
+        ! if(i==111.and.j==39)then
+        !     print *, "temp",temp(i,j),temp_old(i,j)
+        ! endif
         temp(i,j) = temp(i,j) + dt/(dens*c*volume)*surface &
-                                  * ( (temp_old(i+1,j  ) - temp_old(i,j))/res_e &
-                                    + (temp_old(i-1,j  ) - temp_old(i,j))/res_w &
+                                  * ( (temp_old(i+1,j  ) - temp_old(i,j))/res_e & !右（東）
+                                    + (temp_old(i-1,j  ) - temp_old(i,j))/res_w & !左（西）
                                     + (temp_old(i  ,j+1) - temp_old(i,j))/res_n &
                                     + (temp_old(i  ,j-1) - temp_old(i,j))/res_s) !修正ポイント1
-
+        test1 = dt/(dens*c*volume)*surface &
+        * ( (temp_old(i+1,j  ) - temp_old(i,j))/res_e & !右（東）
+          + (temp_old(i-1,j  ) - temp_old(i,j))/res_w & !左（西）
+          + (temp_old(i  ,j+1) - temp_old(i,j))/res_n &
+          + (temp_old(i  ,j-1) - temp_old(i,j))/res_s) !修正ポイント1
+        ! フラックス分を追加
+        temp(i,j) = temp(i,j) + dt/(dens*c*volume) &
+                    * ( (-flux_u(i+1,j)+flux_u(i,j))/dx + (-flux_v(i,j+1)+flux_v(i,j))/dy )
+        test2 = dt/(dens*c*volume)*surface &
+        * ( (-flux_u(i+1,j)+flux_u(i,j))/dx + (-flux_v(i,j+1)+flux_v(i,j))/dy )
         ! TopCASTのソース参考（考え方は不明・・・）
-        if(temp(i,j) > max_temp)then
-            temp(i,j) = max_temp
-        elseif(temp(i,j) < min_temp)then
-            temp(i,j) = min_temp
+        ! if(temp(i,j) > Prizm_initial_temp)then
+        !     temp(i,j) = Prizm_initial_temp
+        ! elseif(temp(i,j) < Liquid_initial_temp)then
+        !     temp(i,j) = Liquid_initial_temp
+        ! endif
+        if(i==111.and.j==39)then
+            print *, temp(i,j),temp_old(i,j)
+            print *, (-flux_u(i+1,j)+flux_u(i,j))/dx,(-flux_v(i,j+1)+flux_v(i,j))/dy
+            print *, test1,test2
+            print *, flux_u(i,j),u(i,j),1d0/(dens*c*volume)
         endif
         ! ! TopCASTの式
         ! temp(i,j) = temp_old(i,j) - dt/volume*surface*(conv_u1 + conv_u2 + conv_v1 + conv_v2) &
@@ -491,9 +540,9 @@ subroutine computeTemp(temp,temp_old,eneg,eneg_old)
         !   + (temp_old(i  ,j  ) - temp_old(i-1,j  ))/res_w &
         !   + (temp_old(i  ,j+1) - temp_old(i  ,j  ))/res_n &
         !   + (temp_old(i  ,j  ) - temp_old(i  ,j-1))/res_s)
-        if(i==111.and.j==39)then
-            print *, temp(i,j)
-        endif
+        ! if(i==111.and.j==39)then
+        !     print *, temp(i,j)
+        ! endif
         ! if(i==109.and.j==39)then
         !     print *, temp(i-2,j),temp(i,j),temp(i+2,j),temp(i+4,j)
         ! endif
